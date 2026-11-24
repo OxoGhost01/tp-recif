@@ -1,7 +1,8 @@
 import type { RequestHandler } from "express";
-import { adoptionSchema } from "../schemas/adoption.schema.js";
-import { parseId } from "../schemas/common.js";
-import { parse } from "../schemas/validation.js";
+import { adoptionFiltersSchema, adoptionSchema, toAdoptionPublicDto, toAdoptionStaffDto } from "../dto/adoption.dto.js";
+import { parseId } from "../dto/common.js";
+import { parse } from "../dto/validation.js";
+import type { AdoptionFilters } from "../models/adoption-request.js";
 import type { AdoptionInput, AdoptionService } from "../services/adoption.service.js";
 
 export class AdoptionController {
@@ -9,19 +10,20 @@ export class AdoptionController {
 
     request: RequestHandler = async (req, res) => {
         const fishId = parseId(req.params.id);
-        res.status(201).json(await this.adoptions.request(fishId, parse<AdoptionInput>(adoptionSchema, req.body)));
+        const input = parse<AdoptionInput>(adoptionSchema, req.body, { strict: true });
+        res.status(201).json(toAdoptionPublicDto(await this.adoptions.request(fishId, input)));
     };
 
     list: RequestHandler = async (req, res) => {
-        const status = typeof req.query.status === "string" ? req.query.status : undefined;
-        res.json(await this.adoptions.list({ status }));
+        const filters = parse<AdoptionFilters>(adoptionFiltersSchema, req.query);
+        res.json((await this.adoptions.list(filters)).map(toAdoptionStaffDto));
     };
 
     accept: RequestHandler = async (req, res) => {
-        res.json(await this.adoptions.accept(parseId(req.params.id)));
+        res.json(toAdoptionStaffDto(await this.adoptions.accept(parseId(req.params.id))));
     };
 
     refuse: RequestHandler = async (req, res) => {
-        res.json(await this.adoptions.refuse(parseId(req.params.id)));
+        res.json(toAdoptionStaffDto(await this.adoptions.refuse(parseId(req.params.id))));
     };
 }

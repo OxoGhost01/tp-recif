@@ -19,7 +19,7 @@ export function createApp() {
   const fishService = new FishService(fishDao);
   const adoptionService = new AdoptionService(adoptionDao, fishDao);
 
-  const fishController = new FishController(fishService, adoptionService);
+  const fishController = new FishController(fishService);
   const adoptionController = new AdoptionController(adoptionService);
 
   const app = express();

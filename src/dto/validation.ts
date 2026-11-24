@@ -26,12 +26,14 @@ export const isoDate: Rule = (value) => {
 };
 
 
+export type ValidationOptions = { partial?: boolean; strict?: boolean };
+
 export type ValidationResult<T> = { ok: true; data: T } | { ok: false; errors: string[] };
 
 export function validate<T = Record<string, any>>(
     schema: Schema,
     input: unknown,
-    options: { partial?: boolean } = {},   // partial : pour une modification
+    options: ValidationOptions = {},   // partial : pour une modification ; strict : refuse les champs hors schéma
 ): ValidationResult<T> {
     if (typeof input !== "object" || input === null || Array.isArray(input)) {
         return { ok: false, errors: ["corps de la requête invalide"] };
@@ -39,6 +41,12 @@ export function validate<T = Record<string, any>>(
     const body = input as Record<string, unknown>;
     const errors: string[] = [];
     const data: Record<string, unknown> = {};
+
+    if (options.strict) {
+        for (const field of Object.keys(body)) {
+            if (!(field in schema)) errors.push(`${field} : champ non autorisé`);
+        }
+    }
 
     for (const [field, rule] of Object.entries(schema)) {
         const value = body[field];
@@ -59,7 +67,7 @@ export function validate<T = Record<string, any>>(
 export function parse<T = Record<string, any>>(
     schema: Schema,
     input: unknown,
-    options: { partial?: boolean } = {},
+    options: ValidationOptions = {},
 ): T {
     const result = validate<T>(schema, input, options);
     if (!result.ok) throw new AppError(400, "VALIDATION_ERROR", result.errors.join(" ; "));

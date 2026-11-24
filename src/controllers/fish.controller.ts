@@ -1,35 +1,31 @@
 import type { RequestHandler } from "express";
-import { parseId } from "../schemas/common.js";
-import { fishSchema } from "../schemas/fish.schema.js";
-import { parse } from "../schemas/validation.js";
-import type { AdoptionService } from "../services/adoption.service.js";
-import type { FishService, FishInput } from "../services/fish.service.js";
-
-const queryString = (value: unknown) => (typeof value === "string" ? value : undefined);
+import { fishFiltersSchema, fishSchema, toFishPublicDto, toFishStaffDto } from "../dto/fish.dto.js";
+import { parseId } from "../dto/common.js";
+import { parse } from "../dto/validation.js";
+import type { FishFilters } from "../models/fish.js";
+import type { FishInput, FishService } from "../services/fish.service.js";
 
 export class FishController {
-    constructor(
-        private readonly fishes: FishService,
-        private readonly adoptions: AdoptionService,
-    ) {}
+    constructor(private readonly fishes: FishService) {}
 
     list: RequestHandler = async (req, res) => {
-        res.json(await this.fishes.list({ species: queryString(req.query.species), status: queryString(req.query.status) }));
+        const filters = parse<FishFilters>(fishFiltersSchema, req.query);
+        res.json((await this.fishes.list(filters)).map(toFishPublicDto));
     };
 
     getOne: RequestHandler = async (req, res) => {
-        const id = parseId(req.params.id);
-        const fish = await this.fishes.get(id);
-        res.json({ ...fish, requests: await this.adoptions.listByFish(id) });
+        res.json(toFishPublicDto(await this.fishes.get(parseId(req.params.id))));
     };
 
     create: RequestHandler = async (req, res) => {
-        res.status(201).json(await this.fishes.create(parse<FishInput>(fishSchema, req.body)));
+        const input = parse<FishInput>(fishSchema, req.body, { strict: true });
+        res.status(201).json(toFishStaffDto(await this.fishes.create(input)));
     };
 
     update: RequestHandler = async (req, res) => {
         const id = parseId(req.params.id);
-        res.json(await this.fishes.update(id, parse<Partial<FishInput>>(fishSchema, req.body, { partial: true })));
+        const changes = parse<Partial<FishInput>>(fishSchema, req.body, { partial: true, strict: true });
+        res.json(toFishStaffDto(await this.fishes.update(id, changes)));
     };
 
     remove: RequestHandler = async (req, res) => {

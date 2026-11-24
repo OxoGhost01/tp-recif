@@ -19,10 +19,6 @@ export class AdoptionService {
         return this.adoptions.findAll(filters);
     }
 
-    listByFish(fishId: number): Promise<AdoptionRequest[]> {
-        return this.adoptions.findByFish(fishId);
-    }
-
     async request(fishId: number, input: AdoptionInput): Promise<AdoptionRequest> {
         const fish = await this.fishes.findById(fishId);
         if (!fish) throw new AppError(404, "NOT_FOUND", `Poisson ${fishId} introuvable`);
