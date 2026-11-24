@@ -5,9 +5,9 @@ export interface AdoptionDao {
     findAll(filters?: AdoptionFilters): Promise<AdoptionRequest[]>;
     findById(id: number): Promise<AdoptionRequest | null>;
     findByFish(fishId: number): Promise<AdoptionRequest[]>;
-    create(data: NewAdoptionRequest): Promise<AdoptionRequest>;
-    setStatus(id: number, status: AdoptionStatus): Promise<void>;
-    deleteByFish(fishId: number): Promise<void>;
+    create(data: NewAdoptionRequest): Promise<AdoptionRequest>; // + poisson réservé
+    accept(id: number): Promise<AdoptionRequest>;               // + poisson adopté
+    refuse(id: number): Promise<AdoptionRequest>;               // + poisson à nouveau disponible
 }
 
 type AdoptionRow = {
@@ -45,8 +45,7 @@ export class SqliteAdoptionDao implements AdoptionDao {
     }
 
     async findById(id: number): Promise<AdoptionRequest | null> {
-        const row = this.db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id) as AdoptionRow | undefined;
-        return row ? toAdoptionRequest(row) : null;
+        return this.selectById(id);
     }
 
     async findByFish(fishId: number): Promise<AdoptionRequest[]> {
@@ -57,21 +56,40 @@ export class SqliteAdoptionDao implements AdoptionDao {
     }
 
     async create(data: NewAdoptionRequest): Promise<AdoptionRequest> {
-        const info = this.db
-            .prepare(`INSERT INTO adoption_requests (fish_id, adopter_name, adopter_email, message, status, created_at)
-                VALUES (@fishId, @adopterName, @adopterEmail, @message, 'en_attente', @createdAt)`)
-            .run({ ...data, createdAt: new Date().toISOString() });
-        return (await this.findById(Number(info.lastInsertRowid)))!;
+        const run = this.db.transaction(() => {
+            const info = this.db
+                .prepare(`INSERT INTO adoption_requests (fish_id, adopter_name, adopter_email, message, status, created_at)
+                    VALUES (@fishId, @adopterName, @adopterEmail, @message, 'en_attente', @createdAt)`)
+                .run({ ...data, createdAt: new Date().toISOString() });
+            this.db.prepare("UPDATE fish SET status = 'reserve' WHERE id = ?").run(data.fishId);
+            return this.selectById(Number(info.lastInsertRowid))!;
+        });
+        return run();
     }
 
-    // Une décision (acceptee / refusee) est datée ; on ne repasse jamais en attente
-    async setStatus(id: number, status: AdoptionStatus): Promise<void> {
-        this.db
-            .prepare("UPDATE adoption_requests SET status = ?, decided_at = ? WHERE id = ?")
-            .run(status, status === "en_attente" ? null : new Date().toISOString(), id);
+    async accept(id: number): Promise<AdoptionRequest> {
+        return this.decide(id, "acceptee", "adopte");
     }
 
-    async deleteByFish(fishId: number): Promise<void> {
-        this.db.prepare("DELETE FROM adoption_requests WHERE fish_id = ?").run(fishId);
+    async refuse(id: number): Promise<AdoptionRequest> {
+        return this.decide(id, "refusee", "disponible");
+    }
+
+    // La décision et le nouveau statut du poisson réussissent ensemble, ou pas du tout
+    private decide(id: number, status: AdoptionStatus, fishStatus: string): AdoptionRequest {
+        const run = this.db.transaction(() => {
+            this.db
+                .prepare("UPDATE adoption_requests SET status = ?, decided_at = ? WHERE id = ?")
+                .run(status, new Date().toISOString(), id);
+            const request = this.selectById(id)!;
+            this.db.prepare("UPDATE fish SET status = ? WHERE id = ?").run(fishStatus, request.fishId);
+            return request;
+        });
+        return run();
+    }
+
+    private selectById(id: number): AdoptionRequest | null {
+        const row = this.db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id) as AdoptionRow | undefined;
+        return row ? toAdoptionRequest(row) : null;
     }
 }

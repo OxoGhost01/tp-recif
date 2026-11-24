@@ -6,8 +6,7 @@ export interface FishDao {
     findById(id: number): Promise<Fish | null>;
     create(data: NewFish): Promise<Fish>;
     update(id: number, changes: FishChanges): Promise<Fish | null>;
-    delete(id: number): Promise<boolean>;
-    updateStatus(id: number, status: FishStatus): Promise<void>; // retiré à l'étape 6
+    delete(id: number): Promise<boolean>; // + ses demandes d'adoption
 }
 
 type FishRow = {
@@ -80,10 +79,10 @@ export class SqliteFishDao implements FishDao {
     }
 
     async delete(id: number): Promise<boolean> {
-        return this.db.prepare("DELETE FROM fish WHERE id = ?").run(id).changes > 0;
-    }
-
-    async updateStatus(id: number, status: FishStatus): Promise<void> {
-        this.db.prepare("UPDATE fish SET status = ? WHERE id = ?").run(status, id);
+        const run = this.db.transaction(() => {
+            this.db.prepare("DELETE FROM adoption_requests WHERE fish_id = ?").run(id);
+            return this.db.prepare("DELETE FROM fish WHERE id = ?").run(id).changes > 0;
+        });
+        return run();
     }
 }

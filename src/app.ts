@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from "express";
 import { db } from "./data/db.js";
-import { SqliteFishDao, type FishDao } from "./data/fish.dao.js";
+import { SqliteFishDao } from "./data/fish.dao.js";
 import { SqliteAdoptionDao, type AdoptionDao } from "./data/adoption.dao.js";
 import { parseId } from "./schemas/common.js";
 import { parse } from "./schemas/validation.js";
@@ -10,21 +10,17 @@ import { AppError } from "./errors/app-error.js";
 import { requireApiKey } from "./middlewares/require-api-key.js";
 import { notFound } from "./middlewares/not-found.js";
 import { errorHandler } from "./middlewares/error-handler.js";
-import type { FishStatus } from "./models/fish.js";
 
 // Accepter et refuser une demande : même logique, seule la décision change
-const FISH_STATUS_AFTER = { acceptee: "adopte", refusee: "disponible" } as const satisfies Record<string, FishStatus>;
-
-function decideAdoption(fishDao: FishDao, adoptionDao: AdoptionDao, decision: keyof typeof FISH_STATUS_AFTER) {
+function decideAdoption(adoptionDao: AdoptionDao, decision: "accept" | "refuse") {
   return async (req: Request, res: Response) => {
     const id = parseId(req.params.id);
     const request = await adoptionDao.findById(id);
     if (!request) throw new AppError(404, "NOT_FOUND", `Demande ${id} introuvable`);
     if (request.status !== "en_attente") throw new AppError(409, "CONFLICT", "Demande déjà traitée");
-    await adoptionDao.setStatus(id, decision);
-    await fishDao.updateStatus(request.fishId, FISH_STATUS_AFTER[decision]);
-    console.log(`Demande ${id} ${decision}, il faudrait prévenir ${request.adopterEmail}`);
-    res.status(200).json(await adoptionDao.findById(id));
+    const decided = await adoptionDao[decision](id);
+    console.log(`Demande ${id} ${decided.status}, il faudrait prévenir ${decided.adopterEmail}`);
+    res.status(200).json(decided);
   };
 }
 
@@ -82,7 +78,6 @@ export function createApp() {
   app.delete("/fish/:id", requireApiKey, async (req, res) => {
     const id = parseId(req.params.id);
     if (!(await fishDao.findById(id))) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
-    await adoptionDao.deleteByFish(id);
     await fishDao.delete(id);
     res.status(204).end();
   });
@@ -102,7 +97,6 @@ export function createApp() {
       adopterEmail: b.adopterEmail,
       message: b.message || "",
     });
-    await fishDao.updateStatus(id, "reserve");
     res.status(201).json(request);
   });
 
@@ -113,8 +107,8 @@ export function createApp() {
   });
 
   // Accepter / refuser une demande (équipe du Récif)
-  app.post("/adoptions/:id/accept", requireApiKey, decideAdoption(fishDao, adoptionDao, "acceptee"));
-  app.post("/adoptions/:id/refuse", requireApiKey, decideAdoption(fishDao, adoptionDao, "refusee"));
+  app.post("/adoptions/:id/accept", requireApiKey, decideAdoption(adoptionDao, "accept"));
+  app.post("/adoptions/:id/refuse", requireApiKey, decideAdoption(adoptionDao, "refuse"));
 
   app.use(notFound);
   app.use(errorHandler);
