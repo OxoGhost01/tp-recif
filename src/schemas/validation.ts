@@ -1,3 +1,5 @@
+import { AppError } from "../errors/app-error.js";
+
 export type Rule = (value: unknown) => string | null;
 export type Schema = Record<string, Rule>;
 
@@ -31,11 +33,6 @@ export function validate<T = Record<string, any>>(
     input: unknown,
     options: { partial?: boolean } = {},   // partial : pour une modification
 ): ValidationResult<T> {
-    // Pour chaque champ du schéma :
-    //  - absent et options.partial → on l'ignore ;
-    //  - sinon on applique la règle : un message → on l'ajoute aux erreurs ;
-    //  - valide → on le recopie dans data (texte nettoyé avec trim()).
-    // Les champs qui ne sont PAS dans le schéma ne sont jamais recopiés.
     if (typeof input !== "object" || input === null || Array.isArray(input)) {
         return { ok: false, errors: ["corps de la requête invalide"] };
     }
@@ -56,4 +53,15 @@ export function validate<T = Record<string, any>>(
     }
 
     return errors.length > 0 ? { ok: false, errors } : { ok: true, data: data as T };
+}
+
+// Comme validate, mais lève une AppError 400 si l'entrée est invalide
+export function parse<T = Record<string, any>>(
+    schema: Schema,
+    input: unknown,
+    options: { partial?: boolean } = {},
+): T {
+    const result = validate<T>(schema, input, options);
+    if (!result.ok) throw new AppError(400, "VALIDATION_ERROR", result.errors.join(" ; "));
+    return result.data;
 }
