@@ -1,8 +1,52 @@
-import express from "express";
+import express, { type Request, type Response } from "express";
 import { buildWhere } from "./utils/query-helper.js";
 import { db } from "./data/db.js";
+import { isAdminApiKey, parseId } from "./schemas/common.js";
+import { validate } from "./schemas/validation.js";
+import { fishSchema } from "./schemas/fish.schema.js";
+import { adoptionSchema } from "./schemas/adoption.schema.js";
 
-const DB_FILE = process.env.DB_FILE || "recif.db";
+// Renvoie false (et répond 401) si la clé d'API est absente ou fausse
+function requireAdmin(req: Request, res: Response): boolean {
+  if (isAdminApiKey(req.get("X-Api-Key"))) return true;
+  res.status(401).json({ message: "Non autorisé" });
+  return false;
+}
+
+// Renvoie l'identifiant, ou null (et répond 400) s'il est invalide
+function idOrReject(req: Request, res: Response): number | null {
+  const id = parseId(req.params.id);
+  if (id === null) res.status(400).json({ message: "Identifiant invalide" });
+  return id;
+}
+
+// Accepter et refuser une demande : même logique, seule la décision change
+const FISH_STATUS_AFTER = { acceptee: "adopte", refusee: "disponible" } as const;
+
+function decideAdoption(decision: keyof typeof FISH_STATUS_AFTER) {
+  return (req: Request, res: Response) => {
+    if (!requireAdmin(req, res)) return;
+    const id = idOrReject(req, res);
+    if (id === null) return;
+    const request: any = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id);
+    if (!request) {
+      res.status(404).json({ message: "Demande introuvable" });
+      return;
+    }
+    if (request.status !== "en_attente") {
+      res.status(409).json({ message: "Demande déjà traitée" });
+      return;
+    }
+    db.prepare("UPDATE adoption_requests SET status = ?, decided_at = ? WHERE id = ?").run(decision, new Date().toISOString(), id);
+    db.prepare("UPDATE fish SET status = ? WHERE id = ?").run(FISH_STATUS_AFTER[decision], request.fish_id);
+    const updated = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id);
+    console.log(`Demande ${id} ${decision}, il faudrait prévenir ${request.adopter_email}`);
+    res.status(200).json(updated);
+  };
+}
+
+// camelCase (API) → snake_case (colonnes)
+const toColumn = (field: string) => field.replace(/[A-Z]/g, (m) => "_" + m.toLowerCase());
 
 export function createApp() {
   const app = express();
@@ -25,94 +69,72 @@ export function createApp() {
 
   // Détail d'un poisson, avec ses demandes d'adoption
   app.get("/fish/:id", (req, res) => {
-    const fish: any = db.prepare("SELECT * FROM fish WHERE id = ?").get(req.params.id);
+    const id = idOrReject(req, res);
+    if (id === null) return;
+    const fish: any = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
     if (!fish) {
       res.status(404).send("Poisson introuvable");
       return;
     }
-    fish.requests = db.prepare("SELECT * FROM adoption_requests WHERE fish_id = ?").all(req.params.id);
+    fish.requests = db.prepare("SELECT * FROM adoption_requests WHERE fish_id = ?").all(id);
     res.status(200).json(fish);
   });
 
   // Ajout d'un poisson (équipe du Récif)
   app.post("/fish", express.json(), (req, res) => {
-    if (req.headers["x-api-key"] !== "recif-secret") {
-      res.status(401).json({ message: "Non autorisé" });
+    if (!requireAdmin(req, res)) return;
+    const result = validate<Record<string, any>>(fishSchema, req.body);
+    if (!result.ok) {
+      res.status(400).json({ message: "Données invalides", errors: result.errors });
       return;
     }
-    const b = req.body;
-    if (!b.name || typeof b.name !== "string" || b.name.trim().length === 0 || b.name.length > 50) {
-      res.status(400).json({ message: "Nom invalide" });
-      return;
-    }
-    if (!b.species || ["koi", "betta", "poisson-rouge", "guppy"].indexOf(b.species) === -1) {
-      res.status(400).json({ message: "Espèce invalide" });
-      return;
-    }
-    if (b.birthDate && isNaN(Date.parse(b.birthDate))) {
-      res.status(400).json({ message: "Date de naissance invalide" });
-      return;
-    }
-    if (b.description && b.description.length > 1000) {
-      res.status(400).json({ message: "Description trop longue" });
-      return;
-    }
+    const b = result.data;
     const info = db
       .prepare(
         "INSERT INTO fish (name, species, breed, birth_date, description, internal_notes, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'disponible', ?)",
       )
-      .run(b.name.trim(), b.species, b.breed || null, b.birthDate || null, b.description || "", b.internalNotes || "", new Date().toISOString());
+      .run(b.name, b.species, b.breed || null, b.birthDate || null, b.description || "", b.internalNotes || "", new Date().toISOString());
     const fish = db.prepare("SELECT * FROM fish WHERE id = ?").get(info.lastInsertRowid);
     res.status(201).json(fish);
   });
 
   // Modification d'un poisson (équipe du Récif)
   app.put("/fish/:id", express.json(), (req, res) => {
-    if (req.headers["x-api-key"] !== "recif-secret") {
-      res.status(401).json({ error: "Clé API manquante" });
+    if (!requireAdmin(req, res)) return;
+    const id = idOrReject(req, res);
+    if (id === null) return;
+    const result = validate<Record<string, any>>(fishSchema, req.body, { partial: true });
+    if (!result.ok) {
+      res.status(400).json({ message: "Données invalides", errors: result.errors });
       return;
     }
-    const b = req.body;
-    if (b.name !== undefined && (typeof b.name !== "string" || b.name.trim().length === 0 || b.name.length > 100)) {
-      res.status(400).json({ error: "Nom invalide" });
-      return;
-    }
-    if (b.species !== undefined && ["koi", "betta", "poisson-rouge"].indexOf(b.species) === -1) {
-      res.status(400).json({ error: "Espèce invalide" });
-      return;
-    }
-    if (b.birthDate && isNaN(Date.parse(b.birthDate))) {
-      res.status(400).json({ error: "Date invalide" });
-      return;
-    }
-    const existing = db.prepare("SELECT * FROM fish WHERE id = ?").get(req.params.id);
+    const existing = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
     if (!existing) {
-      res.status(404).json({ error: "Poisson introuvable" });
+      res.status(404).json({ message: "Poisson introuvable" });
       return;
     }
-    // On met à jour tous les champs envoyés
-    const keys = Object.keys(b);
-    if (keys.length > 0) {
-      const sets = keys.map((k) => k.replace(/[A-Z]/g, (m) => "_" + m.toLowerCase()) + " = ?").join(", ");
-      db.prepare("UPDATE fish SET " + sets + " WHERE id = ?").run(...keys.map((k) => b[k]), req.params.id);
+    // Colonnes construites depuis les champs validés (donc ceux du schéma), jamais depuis req.body
+    const fields = Object.keys(result.data);
+    if (fields.length > 0) {
+      const sets = fields.map((f) => `${toColumn(f)} = ?`).join(", ");
+      db.prepare(`UPDATE fish SET ${sets} WHERE id = ?`).run(...fields.map((f) => result.data[f]), id);
     }
-    const fish = db.prepare("SELECT * FROM fish WHERE id = ?").get(req.params.id);
+    const fish = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
     res.status(200).json(fish);
   });
 
   // Suppression d'un poisson (équipe du Récif)
   app.delete("/fish/:id", (req, res) => {
-    if (req.headers["x-api-key"] !== "recif-secret") {
-      res.status(401).send("Non autorisé");
-      return;
-    }
-    const fish = db.prepare("SELECT * FROM fish WHERE id = ?").get(req.params.id);
+    if (!requireAdmin(req, res)) return;
+    const id = idOrReject(req, res);
+    if (id === null) return;
+    const fish = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
     if (!fish) {
       res.status(404).json({ message: "Poisson introuvable" });
       return;
     }
-    db.prepare("DELETE FROM adoption_requests WHERE fish_id = ?").run(req.params.id);
-    db.prepare("DELETE FROM fish WHERE id = ?").run(req.params.id);
+    db.prepare("DELETE FROM adoption_requests WHERE fish_id = ?").run(id);
+    db.prepare("DELETE FROM fish WHERE id = ?").run(id);
     res.status(204).end();
   });
 
@@ -120,93 +142,45 @@ export function createApp() {
 
   // Demande d'adoption (public)
   app.post("/fish/:id/adoptions", express.json(), (req, res) => {
-    const b = req.body;
-    if (!b.adopterName || typeof b.adopterName !== "string" || b.adopterName.trim().length === 0 || b.adopterName.length > 80) {
-      res.status(400).json({ message: "Nom de l'adoptant invalide" });
+    const id = idOrReject(req, res);
+    if (id === null) return;
+    const result = validate<Record<string, any>>(adoptionSchema, req.body);
+    if (!result.ok) {
+      res.status(400).json({ message: "Données invalides", errors: result.errors });
       return;
     }
-    if (!b.adopterEmail || typeof b.adopterEmail !== "string" || b.adopterEmail.indexOf("@") === -1) {
-      res.status(400).json({ message: "Email invalide" });
-      return;
-    }
-    if (b.message && b.message.length > 500) {
-      res.status(400).json({ message: "Message trop long" });
-      return;
-    }
-    const fish: any = db.prepare("SELECT * FROM fish WHERE id = ?").get(req.params.id);
+    const b = result.data;
+    const fish: any = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
     if (!fish) {
       res.status(404).json({ message: "Poisson introuvable" });
       return;
     }
     if (fish.status !== "disponible") {
-      res.status(409).json({ error: "Ce poisson n'est plus disponible" });
+      res.status(409).json({ message: "Ce poisson n'est plus disponible" });
       return;
     }
     const info = db
       .prepare(
         "INSERT INTO adoption_requests (fish_id, adopter_name, adopter_email, message, status, created_at) VALUES (?, ?, ?, ?, 'en_attente', ?)",
       )
-      .run(req.params.id, b.adopterName.trim(), b.adopterEmail, b.message || "", new Date().toISOString());
-    db.prepare("UPDATE fish SET status = 'reserve' WHERE id = ?").run(req.params.id);
+      .run(id, b.adopterName, b.adopterEmail, b.message || "", new Date().toISOString());
+    db.prepare("UPDATE fish SET status = 'reserve' WHERE id = ?").run(id);
     const request = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(info.lastInsertRowid);
     res.status(201).json(request);
   });
 
   // Liste des demandes (équipe du Récif), filtre ?status=
   app.get("/adoptions", (req, res) => {
-    if (req.headers["x-api-key"] !== "recif-secret") {
-      res.status(401).json({ message: "Non autorisé" });
-      return;
-    }
+    if (!requireAdmin(req, res)) return;
     const filters: any = {};
     if (req.query.status) filters.status = { op: "eq", value: req.query.status };
     const rows = db.prepare("SELECT * FROM adoption_requests " + buildWhere(filters) + " ORDER BY id").all();
     res.status(200).json(rows);
   });
 
-  // Accepter une demande (équipe du Récif)
-  app.post("/adoptions/:id/accept", (req, res) => {
-    if (req.headers["x-api-key"] !== "recif-secret") {
-      res.status(401).json({ message: "Non autorisé" });
-      return;
-    }
-    const request: any = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(req.params.id);
-    if (!request) {
-      res.status(404).json({ message: "Demande introuvable" });
-      return;
-    }
-    if (request.status !== "en_attente") {
-      res.status(409).json({ message: "Demande déjà traitée" });
-      return;
-    }
-    db.prepare("UPDATE adoption_requests SET status = 'acceptee', decided_at = ? WHERE id = ?").run(new Date().toISOString(), req.params.id);
-    db.prepare("UPDATE fish SET status = 'adopte' WHERE id = ?").run(request.fish_id);
-    const updated = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(req.params.id);
-    console.log("Demande " + req.params.id + " acceptée, il faudrait prévenir " + request.adopter_email);
-    res.status(200).json(updated);
-  });
-
-  // Refuser une demande (équipe du Récif)
-  app.post("/adoptions/:id/refuse", (req, res) => {
-    if (req.headers["x-api-key"] !== "recif-secret") {
-      res.status(401).json({ message: "Non autorisé" });
-      return;
-    }
-    const request: any = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(req.params.id);
-    if (!request) {
-      res.status(404).json({ message: "Demande introuvable" });
-      return;
-    }
-    if (request.status !== "en_attente") {
-      res.status(409).json({ message: "Demande déjà traitée" });
-      return;
-    }
-    db.prepare("UPDATE adoption_requests SET status = 'refusee', decided_at = ? WHERE id = ?").run(new Date().toISOString(), req.params.id);
-    db.prepare("UPDATE fish SET status = 'disponible' WHERE id = ?").run(request.fish_id);
-    const updated = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(req.params.id);
-    console.log("Demande " + req.params.id + " refusée, il faudrait prévenir " + request.adopter_email);
-    res.status(200).json(updated);
-  });
+  // Accepter / refuser une demande (équipe du Récif)
+  app.post("/adoptions/:id/accept", decideAdoption("acceptee"));
+  app.post("/adoptions/:id/refuse", decideAdoption("refusee"));
 
   return app;
 }
