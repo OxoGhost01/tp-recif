@@ -1,6 +1,5 @@
+import { SPECIES } from "../models/fish.js";
 import { isoDate, oneOf, optional, text, type Schema } from "./validation.js";
-
-export const SPECIES = ["koi", "betta", "poisson-rouge", "guppy"] as const;
 
 export const fishSchema: Schema = {
     name: text(1, 50),
